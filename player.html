@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <title>Restricted Video Player</title>
+
   <style>
     body, html {
       margin: 0;
@@ -11,78 +12,612 @@
       height: 100%;
       background-color: #000;
       overflow: hidden;
+      font-family: Arial, sans-serif;
     }
+
     #player {
       width: 100%;
       height: 100%;
     }
+
     .error-msg {
       color: white;
-      font-family: sans-serif;
       text-align: center;
       padding-top: 20%;
     }
+
+    /* Employee identification screen */
+    #identity-screen {
+      position: absolute;
+      inset: 0;
+      background: #111;
+      color: white;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 20;
+    }
+
+    .identity-box {
+      width: min(360px, 85%);
+      text-align: center;
+    }
+
+    .identity-box h2 {
+      margin-bottom: 8px;
+    }
+
+    .identity-box p {
+      color: #bbb;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+
+    .identity-box input {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 11px;
+      margin-bottom: 10px;
+      border: 1px solid #555;
+      border-radius: 6px;
+      background: #222;
+      color: white;
+      font-size: 15px;
+    }
+
+    .identity-box button {
+      width: 100%;
+      padding: 11px;
+      border: none;
+      border-radius: 6px;
+      background: white;
+      color: black;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    #user-bar {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 15;
+      display: none;
+    }
+
+    #switch-user {
+      border: 0;
+      border-radius: 5px;
+      padding: 5px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      opacity: 0.7;
+    }
+
+    #completion-message {
+      position: absolute;
+      bottom: 15px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 15;
+      background: rgba(0, 0, 0, 0.85);
+      color: white;
+      padding: 9px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      display: none;
+      white-space: nowrap;
+    }
   </style>
 </head>
+
 <body>
 
   <div id="player"></div>
 
+  <!-- First-time employee identification -->
+  <div id="identity-screen">
+    <div class="identity-box">
+
+      <h2>Training Identification</h2>
+
+      <p>
+        Enter your details once. They will be remembered on this browser
+        for your future training modules.
+      </p>
+
+      <input
+        type="text"
+        id="employee-name"
+        placeholder="Full Name"
+        autocomplete="name"
+      >
+
+      <input
+        type="email"
+        id="employee-email"
+        placeholder="Email"
+        autocomplete="email"
+      >
+
+      <button id="continue-button">
+        Continue to Training
+      </button>
+
+    </div>
+  </div>
+
+  <!-- Allows shared computers to change employee -->
+  <div id="user-bar">
+    <button id="switch-user">Not you? Switch user</button>
+  </div>
+
+  <div id="completion-message">
+    Video completion recorded ✓
+  </div>
+
+
   <script>
-    // 1. Automatically extract the 'v' parameter from the URL bar
+
+    /******************************************************
+     * CONFIGURATION
+     ******************************************************/
+
+    const CLOUDFLARE_ENDPOINT =
+      "https://lms-badge-worker.captainlearning11.workers.dev/video-complete";
+
+    const COMPLETION_THRESHOLD = 95;
+
+
+    /******************************************************
+     * VIDEO ID
+     *
+     * Keeps all existing links compatible:
+     * player.html?v=VIDEO_ID
+     ******************************************************/
+
     const urlParams = new URLSearchParams(window.location.search);
-    const YOUTUBE_VIDEO_ID = urlParams.get('v');
+
+    const YOUTUBE_VIDEO_ID = urlParams.get("v");
+
+
+    /******************************************************
+     * EMPLOYEE IDENTITY
+     ******************************************************/
+
+    const NAME_STORAGE_KEY = "lms_employee_name";
+    const EMAIL_STORAGE_KEY = "lms_employee_email";
+
+    let employeeName =
+      localStorage.getItem(NAME_STORAGE_KEY) || "";
+
+    let employeeEmail =
+      localStorage.getItem(EMAIL_STORAGE_KEY) || "";
+
+
+    /******************************************************
+     * PLAYER VARIABLES
+     ******************************************************/
+
+    let player;
+
+    let maxTimeWatched = 0;
+
+    let completionSent = false;
+
+    let progressInterval = null;
+
+
+    /******************************************************
+     * STARTUP
+     ******************************************************/
 
     if (!YOUTUBE_VIDEO_ID) {
-      document.body.innerHTML = '<div class="error-msg">Error: No YouTube Video ID provided in the URL parameter. Example: player.html?v=VIDEO_ID</div>';
+
+      document.body.innerHTML =
+        '<div class="error-msg">' +
+        'Error: No YouTube Video ID provided.' +
+        '</div>';
+
     } else {
-      // 2. Load the YouTube IFrame Player API
-      var tag = document.createElement('script');
-      tag.src = "https://www.youtube.com/iframe_api";
-      var firstScriptTag = document.getElementsByTagName('script')[0];
-      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+      initializeIdentity();
+
     }
 
-    var player;
-    var maxTimeWatched = 0;
+
+    /******************************************************
+     * IDENTITY SCREEN
+     ******************************************************/
+
+    function initializeIdentity() {
+
+      if (employeeName && employeeEmail) {
+
+        // Existing employee identity found.
+        document.getElementById("user-bar").style.display = "block";
+
+        loadYouTubeAPI();
+
+      } else {
+
+        // First time on this browser.
+        document.getElementById("identity-screen").style.display = "flex";
+
+      }
+
+    }
+
+
+    document
+      .getElementById("continue-button")
+      .addEventListener("click", saveEmployeeIdentity);
+
+
+    function saveEmployeeIdentity() {
+
+      const nameInput =
+        document.getElementById("employee-name").value.trim();
+
+      const emailInput =
+        document.getElementById("employee-email").value.trim().toLowerCase();
+
+
+      if (!nameInput) {
+
+        alert("Please enter your full name.");
+
+        return;
+
+      }
+
+
+      if (!emailInput || !emailInput.includes("@")) {
+
+        alert("Please enter a valid email.");
+
+        return;
+
+      }
+
+
+      employeeName = nameInput;
+
+      employeeEmail = emailInput;
+
+
+      localStorage.setItem(
+        NAME_STORAGE_KEY,
+        employeeName
+      );
+
+      localStorage.setItem(
+        EMAIL_STORAGE_KEY,
+        employeeEmail
+      );
+
+
+      document.getElementById("identity-screen").style.display = "none";
+
+      document.getElementById("user-bar").style.display = "block";
+
+
+      loadYouTubeAPI();
+
+    }
+
+
+    /******************************************************
+     * SWITCH EMPLOYEE
+     *
+     * Useful for shared computers.
+     ******************************************************/
+
+    document
+      .getElementById("switch-user")
+      .addEventListener("click", function () {
+
+        localStorage.removeItem(NAME_STORAGE_KEY);
+
+        localStorage.removeItem(EMAIL_STORAGE_KEY);
+
+        location.reload();
+
+      });
+
+
+    /******************************************************
+     * LOAD YOUTUBE API
+     ******************************************************/
+
+    function loadYouTubeAPI() {
+
+      if (window.YT && window.YT.Player) {
+
+        onYouTubeIframeAPIReady();
+
+        return;
+
+      }
+
+
+      const tag = document.createElement("script");
+
+      tag.src = "https://www.youtube.com/iframe_api";
+
+
+      const firstScriptTag =
+        document.getElementsByTagName("script")[0];
+
+
+      firstScriptTag.parentNode.insertBefore(
+        tag,
+        firstScriptTag
+      );
+
+    }
+
+
+    /******************************************************
+     * YOUTUBE PLAYER
+     ******************************************************/
 
     function onYouTubeIframeAPIReady() {
-      player = new YT.Player('player', {
+
+      player = new YT.Player("player", {
+
         videoId: YOUTUBE_VIDEO_ID,
+
         playerVars: {
-          'rel': 0,
-          'modestbranding': 1,
-          'controls': 1
+
+          rel: 0,
+
+          modestbranding: 1,
+
+          controls: 1
+
         },
+
         events: {
-          'onReady': onPlayerReady,
-          'onStateChange': onPlayerStateChange
+
+          onReady: onPlayerReady,
+
+          onStateChange: onPlayerStateChange
+
         }
+
       });
+
     }
 
-    function onPlayerReady(event) {
-      setInterval(checkProgress, 250);
+
+    function onPlayerReady() {
+
+      if (progressInterval) {
+
+        clearInterval(progressInterval);
+
+      }
+
+
+      progressInterval =
+        setInterval(checkProgress, 250);
+
     }
+
 
     function onPlayerStateChange(event) {
-      if (event.data == YT.PlayerState.PLAYING) {
+
+      if (event.data === YT.PlayerState.PLAYING) {
+
         checkProgress();
+
       }
+
     }
+
+
+    /******************************************************
+     * WATCH PROGRESS + ANTI-FORWARD SEEKING
+     ******************************************************/
 
     function checkProgress() {
-      if (!player || typeof player.getCurrentTime !== 'function') return;
-      
-      var currentTime = player.getCurrentTime();
 
-      // Enforce anti-forwarding logic
-      if (currentTime > maxTimeWatched + 1.5) { 
-        player.seekTo(maxTimeWatched, true);
-      } else if (currentTime > maxTimeWatched) {
-        maxTimeWatched = currentTime;
+      if (
+        !player ||
+        typeof player.getCurrentTime !== "function" ||
+        typeof player.getDuration !== "function"
+      ) {
+
+        return;
+
       }
+
+
+      const currentTime =
+        player.getCurrentTime();
+
+      const duration =
+        player.getDuration();
+
+
+      if (!duration || duration <= 0) {
+
+        return;
+
+      }
+
+
+      /*
+       * Prevent jumping ahead.
+       *
+       * Backward seeking is still allowed.
+       */
+
+      if (currentTime > maxTimeWatched + 1.5) {
+
+        player.seekTo(
+          maxTimeWatched,
+          true
+        );
+
+        return;
+
+      }
+
+
+      if (currentTime > maxTimeWatched) {
+
+        maxTimeWatched = currentTime;
+
+      }
+
+
+      /****************************************************
+       * CALCULATE WATCH %
+       ****************************************************/
+
+      const watchPercent =
+        (maxTimeWatched / duration) * 100;
+
+
+      /****************************************************
+       * COMPLETION THRESHOLD
+       ****************************************************/
+
+      if (
+        watchPercent >= COMPLETION_THRESHOLD &&
+        !completionSent
+      ) {
+
+        completionSent = true;
+
+        submitVideoCompletion(watchPercent);
+
+      }
+
     }
+
+
+    /******************************************************
+     * SEND COMPLETION TO CLOUDFLARE
+     ******************************************************/
+
+    async function submitVideoCompletion(watchPercent) {
+
+      try {
+
+        const response = await fetch(
+          CLOUDFLARE_ENDPOINT,
+          {
+
+            method: "POST",
+
+            headers: {
+
+              "Content-Type": "application/json"
+
+            },
+
+            body: JSON.stringify({
+
+              fullName: employeeName,
+
+              email: employeeEmail,
+
+              videoId: YOUTUBE_VIDEO_ID,
+
+              watchPercent:
+                Math.min(
+                  100,
+                  Math.round(watchPercent * 100) / 100
+                )
+
+            })
+
+          }
+        );
+
+
+        const result =
+          await response.json();
+
+
+        console.log(
+          "LMS completion response:",
+          result
+        );
+
+
+        if (
+          result.success &&
+          result.completed
+        ) {
+
+          showCompletionMessage(
+            result.duplicate
+              ? "Video was already completed ✓"
+              : "Video completion recorded ✓"
+          );
+
+        } else {
+
+          /*
+           * Allow another attempt if the backend
+           * did not accept the completion.
+           */
+
+          completionSent = false;
+
+          console.error(
+            "Completion was not accepted:",
+            result
+          );
+
+        }
+
+      } catch (error) {
+
+        /*
+         * Network failure:
+         * allow the player to attempt submission again.
+         */
+
+        completionSent = false;
+
+        console.error(
+          "Unable to record video completion:",
+          error
+        );
+
+      }
+
+    }
+
+
+    /******************************************************
+     * COMPLETION MESSAGE
+     ******************************************************/
+
+    function showCompletionMessage(message) {
+
+      const element =
+        document.getElementById("completion-message");
+
+
+      element.textContent = message;
+
+      element.style.display = "block";
+
+
+      setTimeout(function () {
+
+        element.style.display = "none";
+
+      }, 5000);
+
+    }
+
   </script>
+
 </body>
 </html>
